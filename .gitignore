@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# Local Falcon credentials live in the crowdstrike module, never here.
+config.json

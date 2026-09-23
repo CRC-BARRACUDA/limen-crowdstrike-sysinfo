@@ -1,0 +1,78 @@
+# English strings for the module's own screens.
+#
+# The default language: anything missing from another catalog falls back here,
+# and anything missing here renders as its own key — visible enough to notice.
+#
+# `[module]` is different: the *host* reads it for the card and the tab, and
+# English falls back to limen.toml — which is why it is in uk.toml and not here.
+
+[ui]
+title = "Fleet system info"
+subtitle = "What each host actually is, read over RTR — OS, serials, CPU, memory, disks and firmware."
+fetch_hosts = "Fetch hosts"
+scan_selected = "Scan Selected"
+scan_all = "Scan All"
+stop = "Stop"
+search = "Search"
+search_hint = "serial, model, BIOS…"
+filter = "Filter"
+reachable = "Reachable hosts ({n}) — tick the ones to scan"
+no_reachable = "No reachable hosts. RTR needs the host online."
+scanned = "Scanned ({n}) — double-click a host to open its details"
+open_host = "Open details"
+not_scanned = "Not scanned ({n})"
+col_host = "Host"
+col_why = "Why"
+shown_of = "{shown} of {total} shown"
+no_match = "Nothing matches that search."
+
+[state]
+queued = "waiting"
+scanning = "scanning…"
+done = "done"
+failed = "failed"
+stopped = "stopped"
+skipped = "OS not supported"
+failed_why = "failed — {why}"
+
+[status]
+reachable = "{n} reachable host(s)"
+fetch_failed = "fetch failed: {err}"
+none_selected = "no hosts selected — tick at least one"
+already_running = "a scan is already running"
+starting = "scanning {n} host(s)…"
+progress = "scanning — {done} of {total} done, {items} fact(s) so far"
+scanned = "{n} host(s) scanned"
+items = "{n} fact(s)"
+failed = "{n} failed"
+stopped = "{n} stopped"
+unsupported = "{n} unsupported"
+stopping = "stopping — hosts already in flight will finish"
+
+[host]
+unknown = "That host is not in the last scan."
+nothing = "The host reported nothing about itself."
+
+[col]
+item = "Item"
+value = "Value"
+
+[section]
+system = "System"
+os = "Operating system"
+cpu = "Processor"
+memory = "Memory"
+disk = "Disks"
+display = "Display"
+firmware = "Firmware"
+
+[ui2]
+col_os = "OS"
+col_model = "Model"
+col_serial = "Serial"
+col_memory = "Memory"
+
+[note]
+truncated = "more than {n} facts — list cut short"
+empty = "the host reported nothing about itself"
+no_dmi = "DMI was not readable, so the serial numbers are missing rather than absent"

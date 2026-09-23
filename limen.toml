@@ -1,0 +1,43 @@
+[module]
+name = "crowdstrike-sysinfo"
+display_name = "Fleet system info"
+version = "0.1.0"
+language = "python"
+entry = "main.py"
+description = "Read what each CrowdStrike fleet host actually is over RTR — OS and build, serial numbers, CPU, memory down to the DIMM, disks, firmware and uptime."
+authors = ["Limen"]
+repo = "CRC-BARRACUDA/limen-crowdstrike-sysinfo"
+
+[provides]
+capabilities = ["crowdstrike.sysinfo"]
+
+# Needs the crowdstrike module for auth (token + API base) and the inventory.
+[requires.capabilities]
+"crowdstrike" = ">=0.1"
+
+# Installing this pulls the crowdstrike module too.
+[dependencies]
+crowdstrike = "CRC-BARRACUDA/limen-crowdstrike"
+
+[permissions]
+# Reaches the Falcon API directly (RTR endpoints).
+network = ["*.crowdstrike.com"]
+# Runs an enumeration script on remote fleet hosts. The scripts only read
+# inventory tables — CIM classes, /sys, system_profiler — and change nothing, but
+# "read-only" is a property of the script, not of the permission, so the
+# permission stays the honest one: this executes code on your fleet.
+run_hosts = true
+
+# Deliberately NOT here:
+#
+#   may_require_admin — that field means Limen's *own* machine may need
+#     administrator rights, and this module needs none: it makes HTTPS calls to
+#     the Falcon API and nothing else. The privilege it needs is Falcon-side and
+#     remote (the RTR admin tier, for `runscript`), which is a scope on the API
+#     client rather than anything about this workstation.
+#
+#   elevate — never asks the host to run anything as root locally.
+#
+#   elevated_methods — `run_hosts` above already says, on the approval screen,
+#     that this module executes on fleet hosts, and that is consented to once
+#     when the module is trusted.
