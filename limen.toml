@@ -18,6 +18,9 @@ capabilities = ["crowdstrike.sysinfo"]
 # Installing this pulls the crowdstrike module too.
 [dependencies]
 crowdstrike = "CRC-BARRACUDA/limen-crowdstrike"
+# Optional: if a report provider is installed, a "Make Report" action appears.
+[optional.capabilities]
+"report.build" = ">=0.1"
 
 [permissions]
 # Reaches the Falcon API directly (RTR endpoints).
