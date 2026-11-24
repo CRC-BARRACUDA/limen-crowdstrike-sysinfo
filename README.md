@@ -70,6 +70,8 @@ Provides `crowdstrike.sysinfo`.
 ```
 sysinfo                  -> one entry per host
 sysinfo {"item": "bios"} -> only facts whose item or value contains it
+read_host {"id", "hostname", "platform"}
+                         -> read one host on request (the host panel's System)
 ```
 
 Returns **one entry per host**, not a flat list of facts — that is the shape of
@@ -77,6 +79,20 @@ the question. Each entry lifts the headline facts to the top (`os`, `serial`,
 `cpu`, `memory`, `model`) so a caller need not know which section each lives in,
 or that Windows files memory under the system and Linux under memory. `facts`
 holds everything as `section`/`item`/`value`, in the order the host reported it.
+
+`read_host` reads one machine apart from the fleet scan — it neither wipes what
+the fleet screen shows nor waits for it — and answers at once: `scanning` (with
+`elapsed` seconds) until the read is done, then a screen-ready answer in Limen's
+language. `refresh: true` reads again; `start: false` only reports a read taken
+before, for a host that is offline. A finished read is kept, failures included,
+so a caller that polls never starts a new read per poll.
+
+**Windows hosts also get Device specifications** — the nine lines of Settings >
+System > About, formatted as Windows formats them: device name, processor with
+its clock truncated as Windows shows it, installed RAM (with the usable amount
+when it differs), graphics, storage used of total, device ID, product ID, system
+type, and pen and touch. They are read in the hardware pass as raw values and
+formatted here, in the user's language; they also open the fleet screen's host tab.
 
 ## Licence
 

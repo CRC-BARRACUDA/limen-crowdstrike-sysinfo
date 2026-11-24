@@ -45,6 +45,7 @@ Methods
   stop            -> call off what has not started
   open_host       -> one host's facts, in a tab (the double-click target)
   sysinfo         -> the same data as JSON, for other modules
+  read_host       -> read one host on request, for the host panel
 """
 
 import json
@@ -110,6 +111,11 @@ _status = {"msg": ""}
 #   state: "queued" | "scanning" | "done" | "failed" | "stopped"
 _jobs = {}
 _lock = threading.Lock()
+
+# One-host reads asked for by another module — the host panel — by device id.
+# Kept apart from `_jobs`: asking about one machine must neither wipe what the
+# fleet screen is showing nor wait for a fleet scan to finish. Same lock.
+_reads = {}
 
 # Workers must not log through `host`: the SDK's host bridge writes a frame to
 # stdout and then reads stdin, and that is the JSON-RPC pipe. A second thread
@@ -379,7 +385,38 @@ foreach ($d in @(Get-CimInstance Win32_DiskDrive)) {
 }
 foreach ($g in @(Get-CimInstance Win32_VideoController)) {
   Say 'display' (Clean $g.Name) ('driver ' + (Clean $g.DriverVersion))
+  Say 'about' 'gpu' $g.Name
 }
+# Device specifications, as Settings shows them. Raw values only: the module
+# formats them in the user's language, and Windows translates its own words.
+Say 'about' 'name' $env:COMPUTERNAME
+$p = @(Get-CimInstance Win32_Processor)[0]
+Say 'about' 'cpu' $p.Name
+Say 'about' 'cpu_arch' $p.Architecture
+$mhz = (Get-ItemProperty 'HKLM:\HARDWARE\DESCRIPTION\System\CentralProcessor\0').'~MHz'
+if (-not $mhz) { $mhz = $p.MaxClockSpeed }
+Say 'about' 'cpu_mhz' $mhz
+$ram = 0.0
+foreach ($m in @(Get-CimInstance Win32_PhysicalMemory)) { $ram += [double]$m.Capacity }
+Say 'about' 'ram_installed' $ram
+Say 'about' 'ram_usable' (Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory
+$size = 0.0; $free = 0.0
+foreach ($v in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3')) { $size += [double]$v.Size; $free += [double]$v.FreeSpace }
+Say 'about' 'disk_size' $size
+Say 'about' 'disk_free' $free
+Say 'about' 'device_id' (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\SQMClient').MachineId
+Say 'about' 'product_id' (Get-CimInstance Win32_OperatingSystem).SerialNumber
+Say 'about' 'os64' ([Environment]::Is64BitOperatingSystem)
+# Touch and pen by HID usage (digitizer page 0D: 04 touch screen, 02 pen), not
+# by device name, which Windows translates.
+$touch = 0; $pen = 0
+foreach ($h in @(Get-CimInstance Win32_PnPEntity -Filter 'PNPClass=''HIDClass''')) {
+  $ids = (@($h.CompatibleID) + @($h.HardwareID)) -join ' '
+  if ($ids -match 'UP:000D_U:0004') { $touch++ }
+  if ($ids -match 'UP:000D_U:0002') { $pen++ }
+}
+Say 'about' 'touch' $touch
+Say 'about' 'pen' $pen
 } catch { Write-Output ('#err=' + ($_.Exception.Message -replace '[\r\n\|]', ' ')) }
 """
 # Linux. DMI is where the serial numbers live and it is root-only — which RTR is,
@@ -610,6 +647,102 @@ def _parse(stdout, hostname, host_id):
     return rows, flags
 
 
+_GIB = 1024 ** 3
+# Win32_Processor.Architecture, as Settings names it.
+_ARCH = {"0": "x86", "5": "ARM", "9": "x64", "12": "ARM64"}
+
+
+def _device_specs(rows):
+    """Windows' "Device specifications", from the host's `about` facts.
+
+    The lines Settings > System > About shows, in its order and formatted the
+    way it formats them — the clock speed truncated rather than rounded, so the
+    number matches the one on the machine's own screen; installed memory with
+    the usable amount beside it when they differ; storage as used of total
+    across the fixed drives. Empty for a host that sent no `about` facts, which
+    is every host that is not Windows.
+
+    Pen and touch are known only as present or not: whether a digitizer is
+    there is read from the device list, and how many touch points it takes is
+    not something the device list says.
+    """
+    about = {}
+    gpus = []
+    for r in rows:
+        if r["section"] != "about":
+            continue
+        if r["item"] == "gpu":
+            gpus.append(r["value"])
+        else:
+            about.setdefault(r["item"], r["value"])
+    if not about and not gpus:
+        return []
+
+    def num(text):
+        try:
+            return float(text)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def dec(x, places):
+        return f"{x:.{places}f}".replace(".", t("spec.decimal"))
+
+    out = []
+    if about.get("name"):
+        out.append([t("spec.name"), about["name"]])
+    if about.get("cpu"):
+        mhz = num(about.get("cpu_mhz"))
+        cpu = about["cpu"].strip()
+        if mhz:
+            # Truncated to two places, as Settings shows it: 2895 MHz is 2.89.
+            cpu += " (" + t("spec.ghz", n=dec(int(mhz / 10) / 100, 2)) + ")"
+        out.append([t("spec.processor"), cpu])
+    installed = num(about.get("ram_installed")) / _GIB
+    usable = num(about.get("ram_usable")) / _GIB
+    if installed or usable:
+        if installed and usable and installed - usable >= 0.05:
+            ram = t("spec.ram_usable", installed=dec(installed, 1), usable=dec(usable, 1))
+        else:
+            ram = t("spec.gb", n=dec(installed or usable, 1))
+        out.append([t("spec.ram"), ram])
+    if gpus:
+        out.append([t("spec.gpu"), ", ".join(gpus)])
+    size = num(about.get("disk_size"))
+    if size:
+        used = size - num(about.get("disk_free"))
+        out.append([t("spec.storage"), t("spec.storage_used",
+                                         used=round(used / _GIB), total=round(size / _GIB))])
+    if about.get("device_id"):
+        out.append([t("spec.device_id"), about["device_id"].strip("{} ").upper()])
+    if about.get("product_id"):
+        out.append([t("spec.product_id"), about["product_id"]])
+    if about.get("os64"):
+        bits = "64" if about["os64"].strip().lower() == "true" else "32"
+        arch = _ARCH.get(about.get("cpu_arch", "").strip())
+        out.append([t("spec.system_type"),
+                    t("spec.system_type_cpu", bits=bits, arch=arch) if arch
+                    else t("spec.system_type_os", bits=bits)])
+    if "touch" in about or "pen" in about:
+        touch, pen = num(about.get("touch")) > 0, num(about.get("pen")) > 0
+        out.append([t("spec.pen"), t("spec.pen_touch" if touch and pen else
+                                     "spec.touch_only" if touch else
+                                     "spec.pen_only" if pen else "spec.no_pen")])
+    return out
+
+
+def _headline(rows):
+    """The one-line answer, before the detail.
+
+    Model, OS and serial is what identifies a machine, and having to read three
+    sections for it would make the common case the slow one.
+    """
+    head = facts_of(rows)
+    return "   ·   ".join(v for v in [
+        head.get("model"), head.get("os"), head.get("cpu"), head.get("memory"),
+        f"SN {head['serial']}" if head.get("serial") else None,
+    ] if v)
+
+
 def facts_of(rows):
     """The headline facts, by the names another module would ask for.
 
@@ -664,18 +797,14 @@ def _set(hid, **fields):
             job.update(fields)
 
 
-def _worker(hid, token, base, stop):
-    """Enumerate one host. Runs on a pool thread; touches only `_jobs` (locked),
-    `_logq`, and the network."""
-    with _lock:
-        job = _jobs.get(hid)
-        if job is None:
-            return
-        hostname, platform = job["hostname"], job["platform"]
-    if stop.is_set():
-        _set(hid, state="stopped")
-        return
-    _set(hid, state="scanning")
+def _read(hid, hostname, platform, token, base, stop):
+    """Read one host over RTR, and say how it ended.
+
+    Returns the fields of a finished read: `state`, with `facts` and `notes`
+    when it is `done`, or `error` when it is not. Shared by the fleet scan and
+    the one-host read another module asks for, so both read a machine the same
+    way. Runs on a worker thread; touches only `_logq` and the network.
+    """
     try:
         stdout = _rtr_one(hid, platform, token, base, stop)
         rows, flags = _parse(stdout, hostname, hid)
@@ -691,16 +820,31 @@ def _worker(hid, token, base, stop):
             notes.append(flags["error"])
         if not rows and not notes:
             notes.append(t("note.empty"))
-        _set(hid, state="done", facts=rows, notes=notes)
         _log(f"cs-sysinfo: {hostname} — {len(rows)} fact(s)")
+        return {"state": "done", "facts": rows, "notes": notes}
     except _Stopped:
-        _set(hid, state="stopped")
+        return {"state": "stopped"}
     except _UnknownOS as exc:
-        _set(hid, state="skipped", error=str(exc))
         _log(f"cs-sysinfo: {hostname} skipped — {exc}")
+        return {"state": "skipped", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
-        _set(hid, state="failed", error=str(exc))
         _log(f"cs-sysinfo: {hostname} failed — {exc}")
+        return {"state": "failed", "error": str(exc)}
+
+
+def _worker(hid, token, base, stop):
+    """Enumerate one host of a fleet scan. Runs on a pool thread; touches only
+    `_jobs` (locked), `_logq`, and the network."""
+    with _lock:
+        job = _jobs.get(hid)
+        if job is None:
+            return
+        hostname, platform = job["hostname"], job["platform"]
+    if stop.is_set():
+        _set(hid, state="stopped")
+        return
+    _set(hid, state="scanning")
+    _set(hid, **_read(hid, hostname, platform, token, base, stop))
 
 
 def _start(host, targets):
@@ -904,6 +1048,10 @@ def _sections(rows):
     """Group facts by section, in reading order."""
     out = {}
     for r in rows:
+        # The raw values behind Device specifications: shown formatted, by
+        # `_device_specs`, and never as a table of their own.
+        if r["section"] == "about":
+            continue
         out.setdefault(r["section"], []).append(r)
     order = [s for s in SECTION_ORDER if s in out]
     order += sorted(s for s in out if s not in SECTION_ORDER)
@@ -934,17 +1082,9 @@ def open_host(params, host):
     query = (_query.get(hid) or "").lower()
 
     rows = job["facts"]
-    head = facts_of(rows)
     widgets = [
         Label(name, style="heading"),
-        # The one-line answer, before the detail: model, OS and serial is what
-        # identifies a machine, and having to read three sections for it would
-        # make the common case the slow one.
-        Label("   ·   ".join(v for v in [
-            head.get("model"), head.get("os"), head.get("cpu"),
-            head.get("memory"),
-            f"SN {head['serial']}" if head.get("serial") else None,
-        ] if v) or "—", style="weak"),
+        Label(_headline(rows) or "—", style="weak"),
     ]
     for note in job["notes"]:
         widgets.append(Label("! " + note, style="weak"))
@@ -957,6 +1097,12 @@ def open_host(params, host):
     ]))
 
     shown = 0
+    specs = [s for s in _device_specs(rows)
+             if not query or query in (s[0] + " " + s[1]).lower()]
+    if specs:
+        shown += len(specs)
+        widgets += [Separator(), Label(t("spec.title"), style="strong"),
+                    Table(columns(), specs)]
     for section, facts in _sections(rows):
         cells = [[f["item"], f["value"]] for f in facts
                  if not query or query in (f["item"] + " " + f["value"]).lower()]
@@ -977,6 +1123,87 @@ def open_host(params, host):
         widgets.append(Label(t("ui.shown_of", shown=shown, total=len(rows)),
                              style="weak"))
     return Window(name, widgets).to_spec()
+
+
+@m.method("read_host")
+def read_host(params, host):
+    """One host's system info, read on request — for the host panel.
+
+    ``{"id", "hostname", "platform"}``, as the ``crowdstrike`` inventory gives
+    them. ``"refresh": true`` reads the host again; ``"start": false`` only says
+    what is already known, for a host that is offline and cannot be asked.
+
+    Returns at once. A read takes seconds, so this starts it and answers
+    ``{"state": "scanning"}``; the caller asks again until it is ``done``,
+    ``failed`` or ``skipped``. A finished read is kept, and answered from until
+    a refresh — a failure too, so that a caller that polls does not start a new
+    read on every frame of a screen that shows the error.
+
+    A ``done`` answer is ready to show: ``headline``, ``columns`` and ``groups``
+    (a title and its rows each) in the language Limen is in, and ``at`` — when it
+    was read — plus every fact as ``section``/``item``/``value``. A Windows host
+    also has ``specs``: a title and the lines of Settings' Device specifications.
+    """
+    _sync_locale()
+    hid = str(params.get("id") or "")
+    if not hid:
+        return {"state": "failed", "error": "no host id"}
+    with _lock:
+        known = dict(_reads.get(hid) or {})
+    if known and (known["state"] == "scanning" or not params.get("refresh")):
+        return _read_answer(known)
+    if not params.get("start", True):
+        return _read_answer(known) if known else {"state": "none"}
+
+    # The token is fetched here, on the dispatch thread, as for a fleet scan.
+    try:
+        token, base = _auth(host)
+    except Exception as exc:  # noqa: BLE001
+        host.log(f"cs-sysinfo: auth failed: {exc}")
+        return {"state": "failed", "error": str(exc)}
+    hostname = params.get("hostname") or hid
+    platform = params.get("platform") or ""
+    with _lock:
+        _reads[hid] = {"state": "scanning", "at": 0.0, "started": time.time()}
+
+    def run():
+        done = _read(hid, hostname, platform, token, base, threading.Event())
+        done["at"] = time.time()
+        with _lock:
+            _reads[hid] = done
+
+    threading.Thread(target=run, name=f"cs-sysinfo-read-{hid}", daemon=True).start()
+    host.log(f"cs-sysinfo: reading {hostname} for another module")
+    return {"state": "scanning"}
+
+
+def _read_answer(read):
+    """What `read_host` says about a read, ready to show."""
+    out = {
+        "state": read["state"],
+        "at": read.get("at", 0.0),
+        "error": read.get("error", ""),
+        "notes": list(read.get("notes", [])),
+    }
+    if read["state"] == "scanning":
+        # How long it has been going, so a screen waiting on it can say so —
+        # an RTR read takes tens of seconds, and a still screen reads as stuck.
+        out["elapsed"] = int(time.time() - read.get("started", time.time()))
+    if read["state"] == "done":
+        rows = read["facts"]
+        out["headline"] = _headline(rows)
+        specs = _device_specs(rows)
+        if specs:
+            out["specs"] = {"title": t("spec.title"), "rows": specs}
+        out["columns"] = columns()
+        out["groups"] = [
+            {"title": section_title(section),
+             "rows": [[f["item"], f["value"]] for f in facts]}
+            for section, facts in _sections(rows)
+        ]
+        out["facts"] = [{"section": r["section"], "item": r["item"],
+                         "value": r["value"]} for r in rows]
+    return out
 
 
 @m.method("sysinfo")
