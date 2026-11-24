@@ -1,7 +1,7 @@
 [module]
 name = "crowdstrike-sysinfo"
 display_name = "Fleet system info"
-version = "0.1.0"
+version = "0.2.0"
 language = "python"
 entry = "main.py"
 description = "Read what each CrowdStrike fleet host actually is over RTR — OS and build, serial numbers, CPU, memory down to the DIMM, disks, firmware and uptime."
