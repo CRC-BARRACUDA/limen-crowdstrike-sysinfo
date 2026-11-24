@@ -94,6 +94,19 @@ when it differs), graphics, storage used of total, device ID, product ID, system
 type, and pen and touch. They are read in the hardware pass as raw values and
 formatted here, in the user's language; they also open the fleet screen's host tab.
 
+## Reports
+
+With a report provider installed — the
+[`report`](https://github.com/CRC-BARRACUDA/limen-report) module — a **Make
+Report** button appears: on the fleet screen for the last scan, with a line per
+host that was read — OS, model, serial, memory — and a list of the hosts that
+were not; and in a host's tab for that host alone, every fact its tab shows,
+filter included.
+
+The button opens the provider's preview. What the document is, the ground it is
+printed on and whether it is signed with your OpenPGP key are chosen there. A
+host's report is filed under the host's name.
+
 ## Licence
 
 GPL-3.0-or-later.

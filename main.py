@@ -46,6 +46,7 @@ Methods
   open_host       -> one host's facts, in a tab (the double-click target)
   sysinfo         -> the same data as JSON, for other modules
   read_host       -> read one host on request, for the host panel
+  make_report     -> the last scan, or one host of it, handed to a report provider
 """
 
 import json
@@ -1088,13 +1089,19 @@ def open_host(params, host):
     ]
     for note in job["notes"]:
         widgets.append(Label("! " + note, style="weak"))
-    widgets.append(Row([
+    tools = [
         Text("query", label=t("ui.search"), placeholder=t("ui.search_hint"),
              default=_query.get(hid, "")),
         # Re-opens this same tab with the filter applied; the host id rides along
         # so the button knows which host it is filtering.
         Button(t("ui.filter"), calls="open_host", args={"id": hid}),
-    ]))
+    ]
+    if _has_reports():
+        # This host alone, as this tab shows it. Not `open_in_tab`: the report
+        # provider answers with a pop-up, and one opened into a tab of its own
+        # leaves that tab empty.
+        tools.append(Button(t("report.make"), calls="make_report", args={"id": hid}))
+    widgets.append(Row(tools))
 
     shown = 0
     specs = [s for s in _device_specs(rows)
@@ -1204,6 +1211,152 @@ def _read_answer(read):
         out["facts"] = [{"section": r["section"], "item": r["item"],
                          "value": r["value"]} for r in rows]
     return out
+
+
+# --------------------------------------------------------------------------- #
+# The report, when a provider is installed.
+# --------------------------------------------------------------------------- #
+def _has_reports():
+    """Whether a report provider is installed right now.
+
+    Asked each draw rather than cached: `report.build` is optional, and a module
+    installed while this tab is open should make the button appear.
+    """
+    try:
+        return m.host.has_capability("report.build")
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _host_report(hid, job):
+    """One host as a report: what its tab shows, filter included — a report that
+    quietly widened back out to every fact would not be the thing the person
+    asked for, and they would have no way to tell."""
+    name, rows = job["hostname"], job["facts"]
+    query = (_query.get(hid) or "").lower()
+    sections, shown = [], 0
+    specs = [list(s) for s in _device_specs(rows)
+             if not query or query in (s[0] + " " + s[1]).lower()]
+    if specs:
+        shown += len(specs)
+        sections.append({"heading": t("spec.title"), "columns": columns(), "rows": specs})
+    for section, facts in _sections(rows):
+        cells = [[f["item"], f["value"]] for f in facts
+                 if not query or query in (f["item"] + " " + f["value"]).lower()]
+        if cells:
+            shown += len(cells)
+            sections.append({"heading": section_title(section), "columns": columns(),
+                             "rows": cells})
+    # The one-line answer, a line each: what identifies the machine, before the
+    # detail — as the top of its tab says it.
+    head = facts_of(rows)
+    summary = [f"{label}: {head[key]}" for label, key in (
+        (t("ui2.col_model"), "model"), (t("ui2.col_os"), "os"),
+        (t("report.cpu"), "cpu"), (t("ui2.col_memory"), "memory"),
+        (t("ui2.col_serial"), "serial")) if head.get(key)]
+    return {
+        "title": t("report.title_host"),
+        "subtitle": t("report.subtitle_host", host=name, n=shown),
+        # Filed under the machine it is about. The report module adds the date; a
+        # folder of files all called "sysinfo" is one nobody can find anything in.
+        "file_name": f"{name}_sysinfo",
+        "summary": summary + list(job["notes"]),
+        "charts": [],
+        "sections": sections,
+    }
+
+
+def _fleet_report(jobs):
+    """The fleet as a report: a line per host that was read — what it is, as the
+    fleet screen lists it — and the hosts that were not. A host's every fact is
+    its own report, from its tab: here it would be a hundred pages nobody asked
+    for."""
+    done = sorted((j for j in jobs.values() if j["state"] == "done"),
+                  key=lambda j: j["hostname"].lower())
+    # Listed rather than counted: an absent host is the one case where an empty
+    # result means nothing at all.
+    bad = sorted([j["hostname"], j["error"]] for j in jobs.values()
+                 if j["state"] in ("failed", "skipped"))
+    rows, systems, notes = [], {}, []
+    for j in done:
+        head = facts_of(j["facts"])
+        rows.append([j["hostname"], head.get("os", ""), head.get("model", ""),
+                     head.get("serial", ""), head.get("memory", "")])
+        name = head.get("os") or "—"
+        systems[name] = systems.get(name, 0) + 1
+        notes += [f"{j['hostname']}: {note}" for note in j["notes"]]
+    sections = []
+    if rows:
+        sections.append({
+            "heading": t("report.hosts", n=len(rows)),
+            "columns": [t("ui.col_host"), t("ui2.col_os"), t("ui2.col_model"),
+                        t("ui2.col_serial"), t("ui2.col_memory")],
+            "rows": rows,
+        })
+    if bad:
+        sections.append({"heading": t("ui.not_scanned", n=len(bad)),
+                         "columns": [t("ui.col_host"), t("ui.col_why")], "rows": bad})
+    chart = [{"label": k, "value": v}
+             for k, v in sorted(systems.items(), key=lambda kv: (-kv[1], kv[0]))]
+    summary = [t("report.line_hosts", n=len(done))]
+    if bad:
+        summary.append(t("report.line_not_read", n=len(bad)))
+    return {
+        "title": t("report.title"),
+        "subtitle": t("report.subtitle_fleet", hosts=len(done)),
+        "file_name": "fleet_sysinfo",
+        "summary": summary + notes,
+        "charts": [{"title": t("report.by_os"), "data": chart}] if chart else [],
+        "sections": sections,
+    }
+
+
+def report_spec(hid=None):
+    """The last scan as a report spec — with `hid`, one host of it — or `None`
+    when there is nothing to report."""
+    with _lock:
+        jobs = {k: dict(j) for k, j in _jobs.items()}
+    if hid is not None:
+        job = jobs.get(hid)
+        if not job or job["state"] != "done":
+            return None
+        spec = _host_report(hid, job)
+    else:
+        if not any(j["state"] in ("done", "failed", "skipped") for j in jobs.values()):
+            return None
+        spec = _fleet_report(jobs)
+    # Always the provider's preview. What the document is — a PDF — the ground
+    # it is printed on, and whether it is signed are decided there, beside the
+    # thing being saved, by the module that owns the question.
+    spec["format"] = "view"
+    return spec
+
+
+@m.method("make_report")
+def make_report(params, host):
+    """Hand the last scan — or, with ``{"id"}``, one host of it — to whatever
+    report provider is installed."""
+    _sync_locale()
+    spec = report_spec(str(params.get("id") or "") or None)
+    if spec is None:
+        return Window(t("report.title"), [
+            Label(t("report.nothing"), style="strong"),
+        ]).to_spec()
+    try:
+        built = host.call("report.build", "build", spec)
+    except Exception as exc:  # noqa: BLE001
+        return Window(t("report.title"), [
+            Label(t("report.failed"), style="strong"),
+            Label(str(exc), style="weak"),
+        ]).to_spec()
+    # The provider answers with a screen of its own — it is the report.
+    if isinstance(built, dict) and built.get("widgets") is not None:
+        return built
+    # A provider that writes a file and acknowledges with nothing. The one
+    # shipped with Limen always answers with a screen; this is for any other.
+    return Window(t("report.title"), [
+        Label(t("report.written"), style="strong"),
+    ]).to_spec()
 
 
 @m.method("sysinfo")
@@ -1391,6 +1544,12 @@ def ui():
         # that does nothing.
         if running:
             toolbar.append(Button(t("ui.stop"), calls="stop", danger=True))
+    # Offered once a scan has something to say, and not while one is running:
+    # a report of half a fleet reads like a report of the fleet.
+    with _lock:
+        scanned = any(j["state"] in ("done", "failed", "skipped") for j in _jobs.values())
+    if scanned and _has_reports():
+        toolbar.append(Button(t("report.make"), calls="make_report", enabled=not running))
     widgets.append(Row(toolbar))
 
     if _status["msg"]:
